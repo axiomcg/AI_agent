@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -26,9 +27,11 @@ class AutonomousTaskExecutor(TaskExecutor):
         self.llm = llm_client or LLMClient(self.settings)
         self.safety = safety or SafetySentinel()
         self.browser_runner = BrowserRunner(self.settings)
+        self._active_task_id: Optional[str] = None
 
     async def execute(self, ctx: TaskContext) -> None:
         instruction = ctx.task.instructions.strip()
+        self._active_task_id = ctx.task.task_id
         metadata = ctx.task.metadata or {}
         context_window = ContextWindow(max_items=10)
         context_window.add(f"User task: {instruction}", channel=metadata.get("channel"))
@@ -48,26 +51,35 @@ class AutonomousTaskExecutor(TaskExecutor):
             await ctx.log("User explicitly approved continuing with the risky operation.")
 
         try:
+            self._ensure_not_cancelled(ctx)
             plan = await self._generate_plan(instruction, context_window)
             await ctx.log(f"Planner:\n{plan}")
             context_window.add(plan, stage="planner")
 
+            self._ensure_not_cancelled(ctx)
             navigator_notes = await self._navigator_think(instruction, plan, context_window)
             await ctx.log(f"Navigator notes:\n{navigator_notes}")
             context_window.add(navigator_notes, stage="navigator")
 
+            self._ensure_not_cancelled(ctx)
             browser_report = await self.browser_runner.run(instruction, ctx)
             await ctx.log(f"Browser report:\n{browser_report}")
             context_window.add(browser_report, stage="browser")
 
+            self._ensure_not_cancelled(ctx)
             summary = await self._summarize(plan, navigator_notes, browser_report, context_window)
+            summary = self._humanize_summary(summary)
             await ctx.complete(summary)
 
+        except asyncio.CancelledError:
+            raise
         except LLMError as exc:
             await ctx.fail(f"LLM error: {exc}")
         except Exception as exc:  # pragma: no cover - runtime guard
             logger.exception("Orchestrator failure")
             await ctx.fail(str(exc))
+        finally:
+            self._active_task_id = None
 
     async def _generate_plan(self, instruction: str, context_window: ContextWindow) -> str:
         system_prompt = (
@@ -137,3 +149,30 @@ class AutonomousTaskExecutor(TaskExecutor):
             temperature=0.1,
         )
         return response.text.strip()
+
+    @staticmethod
+    def _humanize_summary(summary: str) -> str:
+        lowered = summary.lower()
+        failure_markers = [
+            "no results",
+            "could not",
+            "need to try",
+            "didn't find",
+            "failed",
+            "not available",
+        ]
+        if any(marker in lowered for marker in failure_markers):
+            return (
+                "Я старался выполнить задачу, но результат оказался пустым: "
+                f"{summary} Попробуем поискать это в другом месте или уточним запрос?"
+            )
+        return summary
+
+    async def cancel(self, task_id: str) -> None:
+        if self._active_task_id == task_id:
+            self.browser_runner.stop_active_agent()
+            await self.browser_runner.shutdown()
+
+    def _ensure_not_cancelled(self, ctx: TaskContext) -> None:
+        if ctx.is_cancelled():
+            raise asyncio.CancelledError

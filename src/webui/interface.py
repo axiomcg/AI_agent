@@ -85,6 +85,7 @@ async def _handle_submit(instructions: str, current_task_id: str | None):
             gr.update(),
             current_task_id or "",
             gr.update(),
+            gr.update(value=""),
         )
 
     tasks = manager.list_tasks()
@@ -100,6 +101,7 @@ async def _handle_submit(instructions: str, current_task_id: str | None):
         info_md,
         log_md,
         selected_id,
+        gr.update(value=""),
         gr.update(value=""),
     )
 
@@ -120,6 +122,18 @@ def _handle_selection(task_id: str | None):
     return task_id, _format_active_task_info(task_id), _format_log(task_id)
 
 
+async def _handle_stop_task(task_id: str | None):
+    task_id = (task_id or "").strip()
+    if not task_id:
+        return ("Select a task before stopping it.", gr.update(), gr.update())
+    manager = get_task_manager()
+    try:
+        message = await manager.cancel_task(task_id, reason="Задача остановлена пользователем")
+    except ValueError as exc:
+        return (f"Error: {exc}", gr.update(), gr.update())
+    return (message, _format_active_task_info(task_id), _format_log(task_id))
+
+
 def create_ui(theme_name: str = "Ocean"):
     settings = get_settings()
     css = """
@@ -132,6 +146,10 @@ def create_ui(theme_name: str = "Ocean"):
         border-radius: 8px;
         width: 100%;
         min-height: 320px;
+    }
+    footer a[href*="api"],
+    footer a[href*="gradio"] {
+        display: none !important;
     }
     """
 
@@ -166,6 +184,8 @@ def create_ui(theme_name: str = "Ocean"):
                     choices=initial_choices,
                     interactive=True,
                 )
+                stop_btn = gr.Button("Остановить задачу", variant="stop")
+                stop_status = gr.Markdown("")
                 active_info = gr.Markdown(_format_active_task_info(initial_choices[0] if initial_choices else None))
             with gr.Column(scale=2):
                 gr.Markdown("### Execution log")
@@ -181,6 +201,7 @@ def create_ui(theme_name: str = "Ocean"):
                 log_panel,
                 selected_task_state,
                 instructions,
+                stop_status,
             ],
         )
 
@@ -188,6 +209,12 @@ def create_ui(theme_name: str = "Ocean"):
             _handle_selection,
             inputs=[task_selector],
             outputs=[selected_task_state, active_info, log_panel],
+        )
+
+        stop_btn.click(
+            _handle_stop_task,
+            inputs=[selected_task_state],
+            outputs=[stop_status, active_info, log_panel],
         )
 
         gr.Timer(2.0).tick(

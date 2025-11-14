@@ -101,10 +101,17 @@ class TaskContext:
     async def request_user_input(self, prompt: str) -> str:
         return await self.manager._request_user_input(self.task.task_id, prompt)
 
+    def is_cancelled(self) -> bool:
+        record = self.manager.get_task(self.task.task_id)
+        return bool(record and record.status == TaskStatus.CANCELLED)
+
 
 class TaskExecutor:
     async def execute(self, ctx: TaskContext) -> None:  # pragma: no cover - interface definition
         raise NotImplementedError
+
+    async def cancel(self, task_id: str) -> None:  # pragma: no cover - optional hook
+        return None
 
 
 class NoOpTaskExecutor(TaskExecutor):
@@ -124,6 +131,7 @@ class TaskManager:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._event_subscribers: Dict[str, List[asyncio.Queue[TaskEvent]]] = {}
         self._user_waiters: Dict[str, asyncio.Future[str]] = {}
+        self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
         self._lock = asyncio.Lock()
         self._worker: Optional[asyncio.Task[None]] = None
 
@@ -187,6 +195,23 @@ class TaskManager:
         )
         await self._set_status(task_id, TaskStatus.RUNNING, "Получен ответ пользователя")
 
+    async def cancel_task(self, task_id: str, reason: Optional[str] = None) -> str:
+        task = self.get_task(task_id)
+        if not task:
+            raise ValueError("Задача не найдена")
+        if task.status in TaskStatus.terminal_states():
+            return "Задача уже завершена"
+        message = reason or "Задача остановлена пользователем"
+        await self._set_status(task_id, TaskStatus.CANCELLED, message)
+        waiter = self._user_waiters.pop(task_id, None)
+        if waiter and not waiter.done():
+            waiter.set_result("")
+        runner = self._active_tasks.get(task_id)
+        if runner:
+            runner.cancel()
+        await self.executor.cancel(task_id)
+        return message
+
     async def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():
             loop = asyncio.get_running_loop()
@@ -199,16 +224,23 @@ class TaskManager:
             if not task:
                 self._queue.task_done()
                 continue
+            if task.status == TaskStatus.CANCELLED:
+                self._queue.task_done()
+                continue
             await self._set_status(task_id, TaskStatus.RUNNING)
             ctx = TaskContext(self, task)
+            loop = asyncio.get_running_loop()
+            runner = loop.create_task(self.executor.execute(ctx))
+            self._active_tasks[task_id] = runner
             try:
-                await self.executor.execute(ctx)
+                await runner
             except asyncio.CancelledError:
-                await self._set_status(task_id, TaskStatus.CANCELLED, "Задача отменена")
+                await self._set_status(task_id, TaskStatus.CANCELLED, "Задача остановлена")
             except Exception as exc:  # pragma: no cover - runtime safety
                 logger.exception("Ошибка при выполнении задачи %s", task_id)
                 await ctx.fail(str(exc))
             finally:
+                self._active_tasks.pop(task_id, None)
                 self._queue.task_done()
 
     async def _append_event(self, task_id: str, event: TaskEvent) -> None:

@@ -30,6 +30,7 @@ class BrowserRunner:
         self.controller: Optional[CustomController] = None
         self.llm: Optional[BaseChatModel] = None
         self._mcp_config: Optional[Dict[str, Any]] = None
+        self._active_agent: Optional[BrowserUseAgent] = None
         if self.settings.mcp_server_config:
             try:
                 self._mcp_config = json.loads(self.settings.mcp_server_config)
@@ -111,6 +112,8 @@ class BrowserRunner:
         return ask_user
 
     async def run(self, instruction: str, ctx: TaskContext) -> str:
+        if ctx.is_cancelled():
+            raise asyncio.CancelledError
         await self.ensure_ready(ctx)
         assert self.browser and self.browser_context and self.controller and self.llm
 
@@ -138,9 +141,13 @@ class BrowserRunner:
             register_done_callback=done_cb,
             source="task-runner",
         )
+        self._active_agent = agent
         agent.settings.generate_gif = str(gif_path)
         agent.settings.max_actions_per_step = 10
-        history = await agent.run(max_steps=self.settings.max_agent_steps)
+        try:
+            history = await agent.run(max_steps=self.settings.max_agent_steps)
+        finally:
+            self._active_agent = None
         result = history.final_result()
         result_str = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
 
@@ -171,3 +178,7 @@ class BrowserRunner:
         if self.controller:
             await self.controller.close_mcp_client()
             self.controller = None
+
+    def stop_active_agent(self) -> None:
+        if self._active_agent and not self._active_agent.state.stopped:
+            self._active_agent.state.stopped = True
