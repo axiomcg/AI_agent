@@ -58,18 +58,6 @@ def _format_log(task_id: Optional[str]) -> str:
     return "\n".join(lines)
 
 
-def _format_user_prompt(task_id: Optional[str]) -> str:
-    if not task_id:
-        return "The agent has not requested additional details yet."
-    manager = get_task_manager()
-    task = manager.get_task(task_id)
-    if not task:
-        return "Task not found."
-    if task.pending_user_prompt:
-        return f"**Agent request:** {task.pending_user_prompt}"
-    return "The agent has not requested additional details yet."
-
-
 def _format_active_task_info(task_id: Optional[str]) -> str:
     if not task_id:
         return "No active task."
@@ -83,11 +71,9 @@ def _format_active_task_info(task_id: Optional[str]) -> str:
     )
 
 
-async def _handle_submit(instructions: str, context: str, current_task_id: str | None):
+async def _handle_submit(instructions: str, current_task_id: str | None):
     manager = get_task_manager()
     metadata = {"channel": "webui"}
-    if context.strip():
-        metadata["context"] = context.strip()
 
     try:
         task = await manager.submit_task(instructions, metadata=metadata)
@@ -97,34 +83,23 @@ async def _handle_submit(instructions: str, context: str, current_task_id: str |
             gr.update(),
             gr.update(),
             gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
             current_task_id or "",
-            gr.update(),
             gr.update(),
         )
 
     tasks = manager.list_tasks()
     selected_id = task.task_id
-    table = _format_task_table(tasks)
     dropdown = gr.update(choices=[t.task_id for t in tasks], value=selected_id)
-    stats = _format_queue_stats(tasks)
-    log_md = _format_log(selected_id)
-    prompt_md = _format_user_prompt(selected_id)
     info_md = _format_active_task_info(selected_id)
+    log_md = _format_log(selected_id)
     message = f"Task `{task.short_id()}` added to the queue. Watch the log on the right for updates."
 
     return (
         message,
-        table,
         dropdown,
-        stats,
-        log_md,
-        prompt_md,
         info_md,
+        log_md,
         selected_id,
-        gr.update(value=""),
         gr.update(value=""),
     )
 
@@ -132,37 +107,17 @@ async def _handle_submit(instructions: str, context: str, current_task_id: str |
 def _refresh_dashboard(selected_task_id: str):
     manager = get_task_manager()
     tasks = manager.list_tasks()
-    table = _format_task_table(tasks)
     choices = [task.task_id for task in tasks]
     value = selected_task_id if selected_task_id in choices else (choices[0] if choices else None)
     dropdown = gr.update(choices=choices, value=value)
-    stats = _format_queue_stats(tasks)
-    log_md = _format_log(value)
-    prompt_md = _format_user_prompt(value)
     info_md = _format_active_task_info(value)
-    return table, dropdown, stats, log_md, prompt_md, info_md, (value or "")
+    log_md = _format_log(value)
+    return dropdown, info_md, log_md, (value or "")
 
 
 def _handle_selection(task_id: str | None):
     task_id = task_id or ""
-    return task_id, _format_log(task_id), _format_user_prompt(task_id), _format_active_task_info(task_id)
-
-
-async def _handle_user_response(task_id: str, response: str):
-    if not task_id:
-        return ("Select a task before sending a response.", gr.update(), gr.update(), gr.update())
-    manager = get_task_manager()
-    try:
-        await manager.provide_user_input(task_id, response)
-    except ValueError as exc:
-        return (f"Error: {exc}", gr.update(), gr.update(), gr.update())
-
-    return (
-        "Response sent to the agent.",
-        _format_log(task_id),
-        _format_user_prompt(task_id),
-        gr.update(value=""),
-    )
+    return task_id, _format_active_task_info(task_id), _format_log(task_id)
 
 
 def create_ui(theme_name: str = "Ocean"):
@@ -182,6 +137,7 @@ def create_ui(theme_name: str = "Ocean"):
 
     manager = get_task_manager()
     initial_tasks = manager.list_tasks()
+    initial_choices = [t.task_id for t in initial_tasks]
 
     theme = theme_map.get(theme_name, theme_map["Ocean"])
 
@@ -190,83 +146,54 @@ def create_ui(theme_name: str = "Ocean"):
         gr.Markdown(
             """
             # Autonomous Browser Agent
-            **Submit a task and watch the agent operate inside the browser.**
+            **Submit a task and watch the live execution log.**
             """,
             elem_classes=["header-text"],
         )
 
-        with gr.Row():
-            with gr.Column(scale=2):
-                instructions = gr.Textbox(
-                    label="Task instructions",
-                    placeholder="Example: 'Read the latest 10 emails and remove spam'.",
-                    lines=6,
-                )
-                context_box = gr.Textbox(
-                    label="Additional context (optional)",
-                    placeholder="Hints, constraints, key account details...",
-                    lines=3,
-                )
-                submit_btn = gr.Button("Run agent", variant="primary")
-                submit_status = gr.Markdown("")
-            with gr.Column():
-                queue_stats = gr.Markdown(_format_queue_stats(initial_tasks))
-                vnc_src = f"http://{settings.browser_debugging_host}:{settings.vnc_port}/vnc.html"
-                gr.Markdown("### Live browser preview (VNC)")
-                gr.HTML(f"""<div class=\"vnc-frame\"><iframe src=\"{vnc_src}\" title=\"VNC Viewer\"></iframe></div>""")
+        instructions = gr.Textbox(
+            label="Task instructions",
+            placeholder="Example: 'Read the latest 10 emails and remove spam'.",
+            lines=5,
+        )
+        submit_btn = gr.Button("Run agent", variant="primary")
+        submit_status = gr.Markdown("")
 
         with gr.Row():
             with gr.Column(scale=1):
-                task_selector = gr.Dropdown(label="Active task", choices=[t.task_id for t in initial_tasks], interactive=True)
-                active_info = gr.Markdown(_format_active_task_info(None))
-                task_table = gr.Dataframe(
-                    headers=["ID", "Instructions", "Status", "Created", "Updated"],
-                    value=_format_task_table(initial_tasks),
-                    wrap=True,
-                    interactive=False,
+                task_selector = gr.Dropdown(
+                    label="Active tasks",
+                    choices=initial_choices,
+                    interactive=True,
                 )
-            with gr.Column(scale=1):
+                active_info = gr.Markdown(_format_active_task_info(initial_choices[0] if initial_choices else None))
+            with gr.Column(scale=2):
                 gr.Markdown("### Execution log")
                 log_panel = gr.Markdown("No log entries yet.")
-                gr.Markdown("### Agent requests")
-                user_prompt = gr.Markdown("The agent has not requested additional details yet.")
-                user_response = gr.Textbox(label="User response", lines=3)
-                send_response = gr.Button("Send response", variant="secondary")
-                response_status = gr.Markdown("")
 
         submit_btn.click(
             _handle_submit,
-            inputs=[instructions, context_box, selected_task_state],
+            inputs=[instructions, selected_task_state],
             outputs=[
                 submit_status,
-                task_table,
                 task_selector,
-                queue_stats,
-                log_panel,
-                user_prompt,
                 active_info,
+                log_panel,
                 selected_task_state,
                 instructions,
-                context_box,
             ],
         )
 
         task_selector.change(
             _handle_selection,
             inputs=[task_selector],
-            outputs=[selected_task_state, log_panel, user_prompt, active_info],
-        )
-
-        send_response.click(
-            _handle_user_response,
-            inputs=[selected_task_state, user_response],
-            outputs=[response_status, log_panel, user_prompt, user_response],
+            outputs=[selected_task_state, active_info, log_panel],
         )
 
         gr.Timer(2.0).tick(
             _refresh_dashboard,
             inputs=[selected_task_state],
-            outputs=[task_table, task_selector, queue_stats, log_panel, user_prompt, active_info, selected_task_state],
+            outputs=[task_selector, active_info, log_panel, selected_task_state],
         )
 
     return demo

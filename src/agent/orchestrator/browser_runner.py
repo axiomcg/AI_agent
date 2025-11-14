@@ -52,10 +52,18 @@ class BrowserRunner:
         extra_args = list(getattr(self.settings, "extra_browser_args", []))
         if self.settings.browser_user_data:
             extra_args.append(f"--user-data-dir={self.settings.browser_user_data}")
+        cdp_url: Optional[str] = None
+        if self.settings.browser_cdp:
+            cdp_url = self.settings.browser_cdp
+        elif self.settings.use_own_browser:
+            host = self.settings.browser_debugging_host or "127.0.0.1"
+            cdp_url = f"http://{host}:{self.settings.browser_debugging_port}"
         browser_config = BrowserConfig(
             headless=self.settings.playwright_headless,
-            browser_binary_path=self.settings.browser_path or None,
+            browser_binary_path=None if cdp_url else (self.settings.browser_path or None),
             extra_browser_args=extra_args,
+            cdp_url=cdp_url,
+            chrome_remote_debugging_port=self.settings.browser_debugging_port,
             new_context_config=BrowserContextConfig(
                 window_width=self.settings.resolution_width,
                 window_height=self.settings.resolution_height,
